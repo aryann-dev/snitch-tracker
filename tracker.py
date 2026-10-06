@@ -48,8 +48,16 @@ load_dotenv()
 STORE_URL = (os.environ.get("STORE_URL") or "https://www.snitch.co.in").rstrip("/")  # check_site.py se confirm
 DB_PATH = os.environ.get("DB_PATH") or "data/state.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")  # Neon connection string
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+def _clean_secret(name):
+    """Paste karte waqt aksar quotes, spaces ya "NAME=" bhi chala jaata hai. Use hata do."""
+    v = (os.environ.get(name) or "").strip().strip('"').strip("'").strip()
+    if v.upper().startswith(name + "="):
+        v = v[len(name) + 1:].strip().strip('"').strip("'")
+    return v
+
+
+BOT_TOKEN = _clean_secret("TELEGRAM_BOT_TOKEN")
+CHAT_ID = _clean_secret("TELEGRAM_CHAT_ID")
 
 PAGE_DELAY_SEC = 2          # har page ke beech ruko, site pe load kam
 MAX_PAGES = 400             # safety limit (400 x 250 = 1,00,000 products). Snitch ~23k products = ~94 pages
@@ -384,17 +392,31 @@ def build_messages(changes, now_ist):
     return messages
 
 
+TELEGRAM_FAILED = False  # True hua toh run ke end mein GitHub run RED ho jayega
+
+
 def send_telegram(messages):
+    global TELEGRAM_FAILED
     if not BOT_TOKEN or not CHAT_ID:
         print("(Telegram token/chat id nahi mila, console pe print kar raha hoon)\n")
         for m in messages:
             print(m, "\n---")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print("❌ GitHub pe TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret missing hai.")
+            TELEGRAM_FAILED = True
         return
+    print(f"Telegram: token {len(BOT_TOKEN)} chars, ':' {'hai' if ':' in BOT_TOKEN else 'NAHI hai'}, "
+          f"chat id {CHAT_ID[:3]}... ({len(CHAT_ID)} digits)")
     for m in messages:
-        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                          data={"chat_id": CHAT_ID, "text": m, "disable_web_page_preview": True}, timeout=20)
-        if not r.ok:
-            print("Telegram error:", r.status_code, r.text[:200])
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                              data={"chat_id": CHAT_ID, "text": m, "disable_web_page_preview": True}, timeout=20)
+            if not r.ok:
+                print("❌ Telegram error:", r.status_code, r.text[:200])
+                TELEGRAM_FAILED = True
+        except requests.RequestException as e:
+            print("❌ Telegram error:", e)
+            TELEGRAM_FAILED = True
         time.sleep(1.1)  # Telegram rate limit se bacho
 
 
@@ -443,6 +465,10 @@ def main():
         send_telegram(build_messages(changes, now_utc.astimezone(IST)))
     else:
         print("Koi change nahi.")
+
+    # Data pehle hi save ho chuka hai; ab sirf GitHub ko batana hai ki alert nahi pahuncha
+    if TELEGRAM_FAILED:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

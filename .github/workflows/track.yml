@@ -41,8 +41,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # Naya state agle run ke liye save karo (sirf tab jab run successful ho)
+      # State hamesha save karo. Tracker fail hua toh local state commit hi nahi hota (purana hi rehta hai),
+      # isliye save karna safe hai. Aur Telegram fail hone pe bhi data ka record sahi rahega.
       - name: Save state
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: data/state.db
