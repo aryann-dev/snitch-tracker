@@ -2,7 +2,7 @@ name: Snitch tracker
 
 on:
   schedule:
-    - cron: "0 * * * *"   # har ghante (UTC). GitHub ise kabhi-kabhi late chalata hai.
+    - cron: "17 * * * *"   # har ghante (UTC). GitHub ise kabhi-kabhi late chalata hai.
   workflow_dispatch:       # Actions tab se manually bhi chala sakte ho
 
 permissions:
