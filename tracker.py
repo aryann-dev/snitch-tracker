@@ -81,14 +81,38 @@ def _num(x):
 
 
 # ---------------- 1. Fetch ----------------
+RETRY_WAITS_SEC = [15, 45, 90]  # 503/429 jaisi temporary errors pe itna ruk ke dobara try
+
+
+def get_page_with_retry(url):
+    """Ek page laao. Temporary error (429, 5xx, network) pe thoda ruk ke dobara try karo.
+    Sab tries fail hue toh error raise -> poora run ruk jayega (galat "removed" alerts nahi aayenge)."""
+    for attempt in range(len(RETRY_WAITS_SEC) + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            if r.status_code == 429 or r.status_code >= 500:
+                raise requests.HTTPError(f"{r.status_code} {r.reason}", response=r)
+            r.raise_for_status()  # 403/404 jaisi errors pe retry ka faayda nahi
+            return r.json()
+        except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as e:
+            resp = getattr(e, "response", None)
+            retryable = resp is None or resp.status_code == 429 or resp.status_code >= 500
+            if not retryable or attempt == len(RETRY_WAITS_SEC):
+                raise
+            wait = RETRY_WAITS_SEC[attempt]
+            ra = resp.headers.get("Retry-After") if resp is not None else None
+            if ra and ra.isdigit():
+                wait = max(wait, min(int(ra), 300))
+            print(f"⚠️ {e} -> {wait}s ruk ke dobara try ({attempt + 1}/{len(RETRY_WAITS_SEC)})")
+            time.sleep(wait)
+
+
 def fetch_catalog():
     """Saare products laao. Returns (products, complete). complete=False matlab list adhuri ho sakti hai."""
     products = []
     for page in range(1, MAX_PAGES + 1):
         url = f"{STORE_URL}/products.json?limit=250&page={page}"
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()  # error aaya toh poora run ruk jayega -> galat "removed" alerts nahi aayenge
-        batch = r.json().get("products", [])
+        batch = get_page_with_retry(url).get("products", [])
         if not batch:
             return products, True
         products.extend(batch)
