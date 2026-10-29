@@ -2,8 +2,8 @@ name: Snitch tracker
 
 on:
   schedule:
-    - cron: "17 * * * *"   # har ghante (UTC). GitHub ise kabhi-kabhi late chalata hai.
-  workflow_dispatch:       # Actions tab se manually bhi chala sakte ho
+    - cron: "17 * * * *"   # every hour (UTC). GitHub sometimes runs scheduled jobs late.
+  workflow_dispatch:       # can also be run manually from the Actions tab
 
 permissions:
   contents: read
@@ -25,7 +25,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Pichhle run ka state (data/state.db) wapas laao
+      # Restore the previous run's state (data/state.db)
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
@@ -41,8 +41,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      # State hamesha save karo. Tracker fail hua toh local state commit hi nahi hota (purana hi rehta hai),
-      # isliye save karna safe hai. Aur Telegram fail hone pe bhi data ka record sahi rahega.
+      # Always save the state. If the tracker fails, the local state is never committed (the old one remains),
+      # so saving is safe. The data record also stays correct when Telegram fails.
       - name: Save state
         if: always()
         uses: actions/cache/save@v4

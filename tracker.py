@@ -1,19 +1,19 @@
 """
-Snitch Sale Tracker - V1 (sirf website)
+Snitch Sale Tracker - V1 (website only)
 
 Storage design:
-  - data/state.db (SQLite)  = sirf "abhi ka state", compare karne ke liye. GitHub pe Actions cache mein rehta hai.
+  - data/state.db (SQLite)  = current state only, used for comparison. Kept in the GitHub Actions cache.
   - Neon Postgres (DATABASE_URL) = permanent record: change_log + products + variants + runs.
-  DATABASE_URL na ho toh sab kuch local SQLite mein (testing ke liye).
+  Without DATABASE_URL, everything is stored in local SQLite (for testing).
 
-Har run mein:
-  1. Poora catalog products.json se fetch
-  2. Database ke purane state se compare
-  3. Har change (chahe ₹1 ka ho) change_log table mein permanently save
-  4. Saare changes ka ek grouped summary Telegram pe
+Each run:
+  1. Fetch the full catalog from products.json
+  2. Compare it against the previous state in the database
+  3. Permanently save every change (even a ₹1 difference) to the change_log table
+  4. Send a grouped summary of all changes to Telegram
 
-Pehla run sirf "baseline" save karta hai (koi alert nahi), kyunki compare karne ke liye
-purana data hona chahiye.
+The first run only saves a baseline (no alerts), because there is no previous data
+to compare against yet.
 """
 import hashlib
 import json
@@ -26,9 +26,9 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-# ---------------- .env file (local use ke liye) ----------------
+# ---------------- .env file (for local use) ----------------
 def load_dotenv(path=".env"):
-    """`.env` file se KEY=VALUE padho. Jo variable pehle se set hai, use nahi chhedta."""
+    """Read KEY=VALUE pairs from a `.env` file. Variables that are already set are left untouched."""
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8-sig") as f:
@@ -45,11 +45,11 @@ def load_dotenv(path=".env"):
 load_dotenv()
 
 # ---------------- Settings ----------------
-STORE_URL = (os.environ.get("STORE_URL") or "https://www.snitch.co.in").rstrip("/")  # check_site.py se confirm
+STORE_URL = (os.environ.get("STORE_URL") or "https://www.snitch.co.in").rstrip("/")  # confirmed with check_site.py
 DB_PATH = os.environ.get("DB_PATH") or "data/state.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")  # Neon connection string
 def _clean_secret(name):
-    """Paste karte waqt aksar quotes, spaces ya "NAME=" bhi chala jaata hai. Use hata do."""
+    """Pasted secrets often include quotes, spaces or a leading "NAME=". Strip them."""
     v = (os.environ.get(name) or "").strip().strip('"').strip("'").strip()
     if v.upper().startswith(name + "="):
         v = v[len(name) + 1:].strip().strip('"').strip("'")
@@ -59,16 +59,16 @@ def _clean_secret(name):
 BOT_TOKEN = _clean_secret("TELEGRAM_BOT_TOKEN")
 CHAT_ID = _clean_secret("TELEGRAM_CHAT_ID")
 
-PAGE_DELAY_SEC = 2          # har page ke beech ruko, site pe load kam
-MAX_PAGES = 400             # safety limit (400 x 250 = 1,00,000 products). Snitch ~23k products = ~94 pages
-MAX_TELEGRAM_MSGS = 5       # ek run mein max itne messages, baaki DB mein
+PAGE_DELAY_SEC = 2          # pause between pages to keep load on the site low
+MAX_PAGES = 400             # safety limit (400 x 250 = 100,000 products). Snitch has ~23k products = ~94 pages
+MAX_TELEGRAM_MSGS = 5       # max messages per run; the rest stays in the database
 IST = timezone(timedelta(hours=5, minutes=30))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (personal price tracker; low frequency)",
     "Accept": "application/json",
 }
 
-# Kaunse fields ke change record honge
+# Fields whose changes are recorded
 PRODUCT_FIELDS = ["title", "handle", "product_type", "tags", "published_at", "image", "desc_hash"]
 VARIANT_FIELDS = ["title", "sku", "price", "compare_at_price", "available", "on_sale"]
 
@@ -81,18 +81,18 @@ def _num(x):
 
 
 # ---------------- 1. Fetch ----------------
-RETRY_WAITS_SEC = [15, 45, 90]  # 503/429 jaisi temporary errors pe itna ruk ke dobara try
+RETRY_WAITS_SEC = [15, 45, 90]  # wait this long before retrying temporary errors such as 503/429
 
 
 def get_page_with_retry(url):
-    """Ek page laao. Temporary error (429, 5xx, network) pe thoda ruk ke dobara try karo.
-    Sab tries fail hue toh error raise -> poora run ruk jayega (galat "removed" alerts nahi aayenge)."""
+    """Fetch one page. On temporary errors (429, 5xx, network), wait and retry.
+    If every attempt fails, raise -> the whole run stops (so no false "removed" alerts are sent)."""
     for attempt in range(len(RETRY_WAITS_SEC) + 1):
         try:
             r = requests.get(url, headers=HEADERS, timeout=30)
             if r.status_code == 429 or r.status_code >= 500:
                 raise requests.HTTPError(f"{r.status_code} {r.reason}", response=r)
-            r.raise_for_status()  # 403/404 jaisi errors pe retry ka faayda nahi
+            r.raise_for_status()  # retrying errors like 403/404 does not help
             return r.json()
         except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as e:
             resp = getattr(e, "response", None)
@@ -103,12 +103,12 @@ def get_page_with_retry(url):
             ra = resp.headers.get("Retry-After") if resp is not None else None
             if ra and ra.isdigit():
                 wait = max(wait, min(int(ra), 300))
-            print(f"⚠️ {e} -> {wait}s ruk ke dobara try ({attempt + 1}/{len(RETRY_WAITS_SEC)})")
+            print(f"⚠️ {e} -> retrying in {wait}s ({attempt + 1}/{len(RETRY_WAITS_SEC)})")
             time.sleep(wait)
 
 
 def fetch_catalog():
-    """Saare products laao. Returns (products, complete). complete=False matlab list adhuri ho sakti hai."""
+    """Fetch all products. Returns (products, complete). complete=False means the list may be incomplete."""
     products = []
     for page in range(1, MAX_PAGES + 1):
         url = f"{STORE_URL}/products.json?limit=250&page={page}"
@@ -121,7 +121,7 @@ def fetch_catalog():
 
 
 def normalize(raw_products):
-    """Shopify ke raw data ko simple dicts mein badlo."""
+    """Convert raw Shopify data into simple dicts."""
     prods, variants = {}, {}
     for p in raw_products:
         pid = str(p["id"])
@@ -129,7 +129,7 @@ def normalize(raw_products):
         if isinstance(tags, str):
             tags = [t.strip() for t in tags.split(",") if t.strip()]
         images = p.get("images") or []
-        first_img = images[0].get("src", "").split("?")[0] if images else None  # ?v=123 hatao, warna faltu changes
+        first_img = images[0].get("src", "").split("?")[0] if images else None  # drop ?v=123 to avoid false changes
         prods[pid] = {
             "title": p.get("title"),
             "handle": p.get("handle"),
@@ -142,10 +142,10 @@ def normalize(raw_products):
         for v in p.get("variants") or []:
             price = _num(v.get("price"))
             mrp = _num(v.get("compare_at_price"))
-            # Snitch discount na ho tab MRP "0.00" bhejta hai -> use "MRP nahi hai" (None) maano
+            # Snitch sends MRP as "0.00" when there is no discount -> treat it as "no MRP" (None)
             if mrp is not None and mrp <= 0:
                 mrp = None
-            # on_sale: "No" ya discount %, jaise "40%". Sale shuru/khatam isi se pakda jayega.
+            # on_sale: "No" or the discount %, e.g. "40%". Sale start/end is detected from this.
             if mrp and price is not None and mrp > price:
                 on_sale = f"{round((mrp - price) / mrp * 100)}%"
             else:
@@ -211,10 +211,10 @@ def find_changes(conn, prods, variants, complete, now, log_locally=True):
         changes.append((now, "website", entity, eid, pid, title_of(pid), vtitle, field,
                         None if old is None else str(old), None if new is None else str(new)))
 
-    # Agar is baar products achanak bahut kam aaye, toh fetch par bharosa mat karo (galat "removed" se bacho)
+    # If far fewer products came back this time, don't trust the fetch (avoids false "removed" alerts)
     active_old = sum(1 for _, (_, rem) in old_p.items() if not rem)
     if active_old and len(prods) < 0.5 * active_old:
-        print(f"⚠️ Sirf {len(prods)} products mile (pehle {active_old}). Removal detection skip.")
+        print(f"⚠️ Only {len(prods)} products found (previously {active_old}). Skipping removal detection.")
         complete = False
 
     # --- Products ---
@@ -227,16 +227,16 @@ def find_changes(conn, prods, variants, complete, now, log_locally=True):
                 if removed:
                     log("product", pid, pid, "BACK_ON_SITE", None, data["title"])
                 for f in PRODUCT_FIELDS:
-                    if f in od and od.get(f) != data.get(f):  # naya field add hua ho toh purane rows pe false alert nahi
+                    if f in od and od.get(f) != data.get(f):  # a newly added field must not trigger false alerts on old rows
                         log("product", pid, pid, f, od.get(f), data.get(f))
         upsert(conn, "products", pid, data, now)
 
-    # --- Variants (har size/colour) ---
+    # --- Variants (each size/colour) ---
     for vid, data in variants.items():
         pid = data["product_id"]
         if not first_run:
             if vid not in old_v:
-                if pid in old_p:  # naye product ke variants alag se log nahi karte
+                if pid in old_p:  # variants of a brand-new product are not logged separately
                     log("variant", vid, pid, "NEW_VARIANT", None, data["title"], data["title"])
             else:
                 od, removed = old_v[vid]
@@ -245,7 +245,7 @@ def find_changes(conn, prods, variants, complete, now, log_locally=True):
                         log("variant", vid, pid, f, od.get(f), data.get(f), data["title"])
         upsert(conn, "variants", vid, data, now, pid)
 
-    # --- Removed (sirf tab jab fetch poora hua ho) ---
+    # --- Removed (only when the fetch was complete) ---
     if complete and not first_run:
         for pid, (od, removed) in old_p.items():
             if pid not in prods and not removed:
@@ -253,7 +253,7 @@ def find_changes(conn, prods, variants, complete, now, log_locally=True):
                 conn.execute("UPDATE products SET removed=1 WHERE id=?", (pid,))
         for vid, (od, removed) in old_v.items():
             if vid not in variants and not removed:
-                if od.get("product_id") in prods:  # poora product gaya toh upar log ho chuka
+                if od.get("product_id") in prods:  # if the whole product is gone, it was already logged above
                     log("variant", vid, od.get("product_id"), "REMOVED_VARIANT", od.get("title"), None, od.get("title"))
                 conn.execute("UPDATE variants SET removed=1 WHERE id=?", (vid,))
 
@@ -302,12 +302,12 @@ UPSERT_VARIANT = """INSERT INTO variants
 
 
 def neon_rows(changes, prods, variants, first_run, now_dt):
-    """Neon mein kya likhna hai, woh tayyar karo. Sirf badle hue rows bhejte hain (baseline ke alawa)."""
+    """Prepare the rows to write to Neon. Only changed rows are sent (except for the baseline)."""
     if first_run:
         p_ids, v_ids = set(prods), set(variants)
         removed_pids, removed_vids = [], []
     else:
-        touched = {c[4] for c in changes}  # jin products mein kuch bhi badla
+        touched = {c[4] for c in changes}  # products where anything changed
         p_ids = {pid for pid in touched if pid in prods}
         v_ids = {vid for vid, d in variants.items() if d["product_id"] in touched}
         removed_pids = [int(c[3]) for c in changes if c[7] == "REMOVED_PRODUCT"]
@@ -323,10 +323,10 @@ def neon_rows(changes, prods, variants, first_run, now_dt):
 
 
 def sync_to_neon(changes, prods, variants, first_run, complete, now_dt):
-    import psycopg  # sirf tab chahiye jab DATABASE_URL set ho
+    import psycopg  # only needed when DATABASE_URL is set
 
     p_rows, v_rows, removed_pids, removed_vids, log_rows = neon_rows(changes, prods, variants, first_run, now_dt)
-    # Ek hi transaction: ya sab save hoga, ya kuch nahi
+    # One transaction: either everything is saved, or nothing is
     with psycopg.connect(DATABASE_URL, connect_timeout=30) as conn:
         with conn.cursor() as cur:
             for stmt in NEON_SCHEMA:
@@ -346,16 +346,16 @@ def sync_to_neon(changes, prods, variants, first_run, complete, now_dt):
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""", log_rows)
             cur.execute("INSERT INTO runs (ts, products, variants, changes, complete) VALUES (%s,%s,%s,%s,%s)",
                         (now_dt, len(prods), len(variants), len(changes), complete))
-    print(f"Neon: {len(p_rows)} products, {len(v_rows)} variants upsert, {len(log_rows)} changes save.")
+    print(f"Neon: upserted {len(p_rows)} products, {len(v_rows)} variants; saved {len(log_rows)} changes.")
 
 
 # ---------------- 4. Telegram ----------------
 FIELD_LABEL = {
     "on_sale": "Sale status", "price": "Price", "compare_at_price": "MRP", "available": "Stock",
-    "title": "Naam", "handle": "URL", "product_type": "Category", "tags": "Tags",
+    "title": "Name", "handle": "URL", "product_type": "Category", "tags": "Tags",
     "published_at": "Launch date", "image": "Photo", "desc_hash": "Description", "sku": "SKU",
-    "NEW_PRODUCT": "Naye products", "REMOVED_PRODUCT": "Hataye gaye products",
-    "BACK_ON_SITE": "Wapas aaye products", "NEW_VARIANT": "Naye sizes", "REMOVED_VARIANT": "Hataye gaye sizes",
+    "NEW_PRODUCT": "New products", "REMOVED_PRODUCT": "Removed products",
+    "BACK_ON_SITE": "Products back on site", "NEW_VARIANT": "New sizes", "REMOVED_VARIANT": "Removed sizes",
 }
 
 
@@ -370,25 +370,25 @@ def format_change(c):
         return f"{arrow} {name}: ₹{old} → ₹{new}"
     if field == "on_sale":
         if old == "No":
-            return f"🔥 Sale shuru: {name} ({new} off)"
+            return f"🔥 Sale started: {name} ({new} off)"
         if new == "No":
-            return f"⏹ Sale khatam: {name}"
-        return f"🔥 Discount badla: {name}: {old} → {new}"
+            return f"⏹ Sale ended: {name}"
+        return f"🔥 Discount changed: {name}: {old} → {new}"
     if field == "compare_at_price":
         return f"🏷 {name}: MRP {old or '-'} → {new or '-'}"
     if field == "available":
-        return f"{'✅ Stock wapas' if new == 'True' else '❌ Sold out'}: {name}"
+        return f"{'✅ Back in stock' if new == 'True' else '❌ Sold out'}: {name}"
     if field == "NEW_PRODUCT":
-        return f"🆕 Naya product: {name}"
+        return f"🆕 New product: {name}"
     if field == "REMOVED_PRODUCT":
-        return f"🗑 Hata diya: {name}"
+        return f"🗑 Removed: {name}"
     if field == "BACK_ON_SITE":
-        return f"↩️ Wapas site pe: {name}"
+        return f"↩️ Back on site: {name}"
     if field == "NEW_VARIANT":
-        return f"➕ Naya size: {name}"
+        return f"➕ New size: {name}"
     if field == "REMOVED_VARIANT":
-        return f"➖ Size hataya: {name}"
-    return f"✏️ {name}: {FIELD_LABEL.get(field, field)} badla"
+        return f"➖ Size removed: {name}"
+    return f"✏️ {name}: {FIELD_LABEL.get(field, field)} changed"
 
 
 def build_messages(changes, now_ist):
@@ -397,17 +397,17 @@ def build_messages(changes, now_ist):
     header += [f"• {FIELD_LABEL.get(f, f)}: {n}" for f, n in counts.most_common()]
     header.append("")
 
-    # Price wale changes sabse upar
+    # Price-related changes go first
     order = {"on_sale": 0, "price": 1, "compare_at_price": 2, "available": 3, "NEW_PRODUCT": 4}
     lines = [format_change(c) for c in sorted(changes, key=lambda c: order.get(c[7], 9))]
 
     messages, current = [], "\n".join(header)
     for i, line in enumerate(lines):
-        if len(current) + len(line) + 1 > 3800:  # Telegram limit 4096 chars
+        if len(current) + len(line) + 1 > 3800:  # Telegram limit is 4096 chars
             messages.append(current)
             if len(messages) == MAX_TELEGRAM_MSGS - 1:
                 rest = len(lines) - i
-                current = f"... aur {rest} changes database (change_log) mein save hain."
+                current = f"... and {rest} more changes saved in the database (change_log)."
                 break
             current = line
         else:
@@ -416,17 +416,17 @@ def build_messages(changes, now_ist):
     return messages
 
 
-TELEGRAM_FAILED = False  # True hua toh run ke end mein GitHub run RED ho jayega
+TELEGRAM_FAILED = False  # if True, the GitHub run is marked as failed (red) at the end
 
 
 def send_telegram(messages):
     global TELEGRAM_FAILED
     if not BOT_TOKEN or not CHAT_ID:
-        print("(Telegram token/chat id nahi mila, console pe print kar raha hoon)\n")
+        print("(Telegram token/chat id not found, printing to console instead)\n")
         for m in messages:
             print(m, "\n---")
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            print("❌ GitHub pe TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret missing hai.")
+            print("❌ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret is missing on GitHub.")
             TELEGRAM_FAILED = True
         return
     for m in messages:
@@ -439,7 +439,7 @@ def send_telegram(messages):
         except requests.RequestException as e:
             print("❌ Telegram error:", e)
             TELEGRAM_FAILED = True
-        time.sleep(1.1)  # Telegram rate limit se bacho
+        time.sleep(1.1)  # stay under Telegram's rate limit
 
 
 # ---------------- Main ----------------
@@ -451,16 +451,16 @@ def main():
     try:
         raw, complete = fetch_catalog()
     except Exception as e:
-        print("❌ Fetch fail:", e)
+        print("❌ Fetch failed:", e)
         sys.exit(1)
 
     prods, variants = normalize(raw)
-    print("Mode:", "Neon (DATABASE_URL mila)" if DATABASE_URL else "SIRF LOCAL (DATABASE_URL nahi mila)")
+    print("Mode:", "Neon (DATABASE_URL found)" if DATABASE_URL else "LOCAL ONLY (DATABASE_URL not found)")
     print(f"Fetched {len(prods)} products, {len(variants)} variants (complete={complete})")
     if len(raw) != len(prods):
-        print(f"⚠️ {len(raw)} rows aaye lekin unique products {len(prods)} -> pages repeat ho rahe hain, pagination check karo.")
+        print(f"⚠️ Got {len(raw)} rows but only {len(prods)} unique products -> pages are repeating, check pagination.")
     if len(raw) and len(raw) % 250 == 0:
-        print("⚠️ Products ki ginti 250 ka exact multiple hai. Check karo ki pagination sahi chal raha hai.")
+        print("⚠️ Product count is an exact multiple of 250. Check that pagination is working correctly.")
 
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
@@ -470,10 +470,10 @@ def main():
         try:
             sync_to_neon(changes, prods, variants, first_run, complete, now_utc)
         except Exception as e:
-            # Neon fail hua toh local state bhi save mat karo -> agla run yahi changes dobara pakdega
+            # If Neon failed, don't save the local state either -> the next run will pick up these changes again
             conn.rollback()
             conn.close()
-            print("❌ Neon save fail:", e)
+            print("❌ Neon save failed:", e)
             sys.exit(1)
     conn.execute("INSERT INTO runs (ts, products, variants, changes, complete) VALUES (?,?,?,?,?)",
                  (now, len(prods), len(variants), len(changes), int(complete)))
@@ -481,14 +481,14 @@ def main():
     conn.close()
 
     if first_run:
-        send_telegram([f"✅ Tracker shuru! Baseline save hua: {len(prods)} products, {len(variants)} sizes/variants. "
-                       f"Ab se har change yahan aayega."])
+        send_telegram([f"✅ Tracker started! Baseline saved: {len(prods)} products, {len(variants)} sizes/variants. "
+                       f"From now on, every change will be posted here."])
     elif changes:
         send_telegram(build_messages(changes, now_utc.astimezone(IST)))
     else:
-        print("Koi change nahi.")
+        print("No changes.")
 
-    # Data pehle hi save ho chuka hai; ab sirf GitHub ko batana hai ki alert nahi pahuncha
+    # Data is already saved; this only tells GitHub that the alert was not delivered
     if TELEGRAM_FAILED:
         sys.exit(1)
 

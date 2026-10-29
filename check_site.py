@@ -1,7 +1,7 @@
 """
-STEP 1: Check karo ki Snitch ka products.json khula hai ya nahi, aur kaunse fields milte hain.
-Chalao:  python check_site.py
-Kisi aur site ke liye:  python check_site.py https://example.com
+STEP 1: Check whether Snitch's products.json is publicly available, and which fields it returns.
+Run:  python check_site.py
+For another site:  python check_site.py https://example.com
 """
 import sys
 import requests
@@ -24,26 +24,26 @@ for base in CANDIDATES:
     try:
         r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
     except requests.RequestException as e:
-        print("  Request fail:", e)
+        print("  Request failed:", e)
         continue
 
     print("  Status:", r.status_code)
-    print("  Final URL (redirect ke baad):", r.url)
+    print("  Final URL (after redirects):", r.url)
     print("  Content-Type:", r.headers.get("Content-Type"))
 
     try:
         data = r.json()
     except ValueError:
-        print("  JSON nahi aaya -> shayad HTML page, block page, ya site Shopify pe nahi hai.")
+        print("  Response is not JSON -> probably an HTML page, a block page, or the site is not on Shopify.")
         continue
 
     products = data.get("products")
     if not products:
-        print("  JSON aaya, lekin 'products' khali hai ya nahi mila. Keys:", list(data.keys()))
+        print("  Got JSON, but 'products' is empty or missing. Keys:", list(data.keys()))
         continue
 
     p = products[0]
-    print("  ✅ products.json KAAM KAR RAHA HAI")
+    print("  ✅ products.json IS WORKING")
     print("  Product fields:", sorted(p.keys()))
     variants = p.get("variants") or []
     if variants:
@@ -55,7 +55,7 @@ for base in CANDIDATES:
               "| MRP (compare_at_price):", v.get("compare_at_price"),
               "| available:", v.get("available"))
         if "inventory_quantity" in v:
-            print("  ⚡ inventory_quantity mil raha hai (exact stock number!)")
+            print("  ⚡ inventory_quantity is available (exact stock count!)")
         else:
-            print("  inventory_quantity nahi hai -> sirf in-stock haan/na milega")
-    print("  Is URL ko STORE_URL ki tarah use karo:", r.url.split("/products.json")[0])
+            print("  inventory_quantity is not available -> only in-stock yes/no")
+    print("  Use this URL as STORE_URL:", r.url.split("/products.json")[0])
