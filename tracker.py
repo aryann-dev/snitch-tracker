@@ -429,8 +429,6 @@ def send_telegram(messages):
             print("❌ GitHub pe TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret missing hai.")
             TELEGRAM_FAILED = True
         return
-    print(f"Telegram: token {len(BOT_TOKEN)} chars, ':' {'hai' if ':' in BOT_TOKEN else 'NAHI hai'}, "
-          f"chat id {CHAT_ID[:3]}... ({len(CHAT_ID)} digits)")
     for m in messages:
         try:
             r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
